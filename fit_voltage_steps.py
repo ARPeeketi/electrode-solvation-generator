@@ -81,7 +81,7 @@ def calculate_bic(n, k, ss_res):
 # DATA LOADING
 # =============================================================================
 
-def load_data(filepath, sep=None, decimal='.', encoding='utf-8'):
+def load_data(filepath, sep=None, decimal='.', encoding='utf-8',CBG=0.0):
     """
     Load CSV/TXT data file with automatic column detection.
     
@@ -119,7 +119,10 @@ def load_data(filepath, sep=None, decimal='.', encoding='utf-8'):
     except UnicodeDecodeError:
         df = pd.read_csv(filepath, sep=sep, decimal=decimal, encoding='latin-1')
         print("  Using latin-1 encoding")
-    
+
+    # df['I/mA'] = -df['I/mA'].values - CBG
+    df['Ewe/V'] = df['Ewe/V'].values + 0.721    
+    df['I/mA'] = -df['I/mA'].values - CBG
     print(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
     print(f"  Columns: {list(df.columns)}")
     
@@ -908,41 +911,42 @@ def plot_summary_table(results, save_prefix='fits'):
 def main():
     """Main entry point."""
     
-    # Parse arguments
-    if len(sys.argv) < 2:
-        print(__doc__)
-        print("\nNo input file specified. Run with: python fit_transient_2exp.py data.csv")
-        sys.exit(1)
+    # # Parse arguments
+    # if len(sys.argv) < 2:
+    #     print(__doc__)
+    #     print("\nNo input file specified. Run with: python fit_transient_2exp.py data.csv")
+    #     sys.exit(1)
     
-    filepath = sys.argv[1]
+    # filepath = sys.argv[1]
     
-    # Step type filter
+    # # Step type filter
     step_type_filter = 'falling'  # default
-    if len(sys.argv) >= 3:
-        if sys.argv[2].lower() in ['rising', 'falling', 'both']:
-            step_type_filter = sys.argv[2].lower()
+    # if len(sys.argv) >= 3:
+    #     if sys.argv[2].lower() in ['rising', 'falling', 'both']:
+    #         step_type_filter = sys.argv[2].lower()
     
-    # Parse optional arguments
-    sep = None
-    decimal = '.'
+    # # Parse optional arguments
+    # sep = None
+    # decimal = '.'
     
-    for arg in sys.argv[3:]:
-        if arg.startswith('--sep='):
-            sep = arg.split('=')[1]
-            if sep == '\\t':
-                sep = '\t'
-        elif arg.startswith('--decimal='):
-            decimal = arg.split('=')[1]
+    # for arg in sys.argv[3:]:
+    #     if arg.startswith('--sep='):
+    #         sep = arg.split('=')[1]
+    #         if sep == '\\t':
+    #             sep = '\t'
+    #     elif arg.startswith('--decimal='):
+    #         decimal = arg.split('=')[1]
     
-    print(f"\n{'='*70}")
-    print(f"Two-Exponential Chronoamperometry Fitting")
-    print(f"{'='*70}")
-    print(f"File: {filepath}")
-    print(f"Step filter: {step_type_filter}")
-    print(f"Decimal separator: '{decimal}'")
-    
+    # print(f"\n{'='*70}")
+    # print(f"Two-Exponential Chronoamperometry Fitting")
+    # print(f"{'='*70}")
+    # print(f"File: {filepath}")
+    # print(f"Step filter: {step_type_filter}")
+    # print(f"Decimal separator: '{decimal}'")
+    filepath = 'CER_1500mM_20241120_28_pulse_590mV_N_S1_CER_02_CA_C02.txt'
+    CBGa = -0.0117
     # Load data
-    df, t_col, v_col, i_col = load_data(filepath, sep=sep, decimal=decimal)
+    df, t_col, v_col, i_col = load_data(filepath, sep=r'\s+', decimal=',',CBG=CBGa)
     
     # Analyze
     results = analyze_all_steps(
