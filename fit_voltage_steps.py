@@ -9,23 +9,7 @@ Fits voltage-stepped chronoamperometry data with 1-exp and 2-exp models:
     1-exp: i(t) = A·exp(-t/τ) + B/√t + C
     2-exp: i(t) = A₁·exp(-t/τ₁) + A₂·exp(-t/τ₂) + B/√t + C
 
-Features:
-    - Robust voltage step detection with median smoothing
-    - Automatic 1-exp vs 2-exp model selection via BIC
-    - Comprehensive plotting and Bazant analysis
-    - Supports European decimal format (comma)
-
-Usage:
-    python fit_transient_2exp.py data.csv
-    python fit_transient_2exp.py data.txt falling
-    python fit_transient_2exp.py data.csv both --sep=\\t --decimal=,
-
-Arguments:
-    file       : CSV/TXT file with time, voltage, current columns
-    step_type  : 'rising', 'falling', or 'both' (default: 'falling')
-    --sep      : Column separator (default: auto-detect)
-    --decimal  : Decimal separator (default: '.')
-    
+Outputs comprehensive summary sheet with all coefficients for Bazant and PCET/CER analysis.
 ================================================================================
 """
 
@@ -52,9 +36,6 @@ MIN_STEP_SIZE = 0.05    # Minimum ΔV to count as step (V)
 MIN_DURATION = 0.1      # Minimum time at a level (s)
 SMOOTHING_WINDOW = 50   # Points for median smoothing
 
-# Output
-OUTPUT_PREFIX = 'transient_fits'
-
 
 # =============================================================================
 # MODELS
@@ -78,28 +59,16 @@ def calculate_bic(n, k, ss_res):
 
 
 # =============================================================================
-# DATA LOADING
+# DATA LOADING (User's version)
 # =============================================================================
 
-def load_data(filepath, sep=None, decimal='.', encoding='utf-8',CBG=0.0):
+def load_data(filepath, sep=None, decimal='.', encoding='utf-8', CBG=0.0):
     """
     Load CSV/TXT data file with automatic column detection.
-    
-    Parameters:
-    -----------
-    filepath : str - path to data file
-    sep : str - column separator (None = auto-detect)
-    decimal : str - decimal separator ('.' or ',')
-    encoding : str - file encoding
-    
-    Returns:
-    --------
-    df : DataFrame with standardized column names
-    t_col, v_col, i_col : column name strings
     """
     print(f"\nLoading: {filepath}")
     
-    # Auto-detect separator
+    # Auto-detect separator if not provided
     if sep is None:
         with open(filepath, 'r', encoding=encoding) as f:
             first_line = f.readline()
@@ -120,13 +89,14 @@ def load_data(filepath, sep=None, decimal='.', encoding='utf-8',CBG=0.0):
         df = pd.read_csv(filepath, sep=sep, decimal=decimal, encoding='latin-1')
         print("  Using latin-1 encoding")
 
-    # df['I/mA'] = -df['I/mA'].values - CBG
+    # Apply corrections (RHE conversion and current inversion)
     df['Ewe/V'] = df['Ewe/V'].values + 0.721    
     df['I/mA'] = -df['I/mA'].values - CBG
+    
     print(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
     print(f"  Columns: {list(df.columns)}")
     
-    # Check for units row (second row with units like 's', 'V', 'mA')
+    # Check for units row
     first_row = df.iloc[0]
     is_units_row = False
     for val in first_row:
@@ -148,25 +118,20 @@ def load_data(filepath, sep=None, decimal='.', encoding='utf-8',CBG=0.0):
     # Auto-detect column names
     cols_lower = [c.lower() for c in df.columns]
     
-    t_col = None
-    v_col = None
-    i_col = None
+    t_col = v_col = i_col = None
     
-    # Time column
     for i, c in enumerate(cols_lower):
         if 'time' in c or c == 't' or c == 't/s' or 'zeit' in c:
             t_col = df.columns[i]
             break
     
-    # Voltage column
     for i, c in enumerate(cols_lower):
-        if 'potential' in c or 'voltage' in c or 'ewe' in c or c == 'v' or c == 'e/v' or 'spannung' in c:
+        if 'potential' in c or 'voltage' in c or 'ewe' in c or c == 'v' or c == 'e/v':
             v_col = df.columns[i]
             break
     
-    # Current column
     for i, c in enumerate(cols_lower):
-        if 'current' in c or c == 'i' or 'i/ma' in c or 'strom' in c or c == 'i/a':
+        if 'current' in c or c == 'i' or 'i/ma' in c or c == 'i/a':
             i_col = df.columns[i]
             break
     
@@ -180,7 +145,6 @@ def load_data(filepath, sep=None, decimal='.', encoding='utf-8',CBG=0.0):
     
     print(f"  Using columns: time='{t_col}', voltage='{v_col}', current='{i_col}'")
     
-    # Basic stats
     print(f"\n  Data ranges:")
     print(f"    Time: {df[t_col].min():.4f} - {df[t_col].max():.4f} s")
     print(f"    Voltage: {df[v_col].min():.4f} - {df[v_col].max():.4f} V")
@@ -195,19 +159,7 @@ def load_data(filepath, sep=None, decimal='.', encoding='utf-8',CBG=0.0):
 
 def detect_voltage_steps(df, v_col, t_col, min_step_size=0.05, 
                          min_duration=0.1, smoothing_window=50):
-    """
-    Robustly detect voltage steps in noisy data.
-    
-    Algorithm:
-    1. Smooth voltage with rolling median
-    2. Round to voltage resolution to cluster similar values
-    3. Identify distinct voltage levels with minimum duration
-    4. Detect transitions between levels
-    
-    Returns:
-    --------
-    list of step dicts with V_before, V_after, dV, type, timing
-    """
+    """Robustly detect voltage steps in noisy data."""
     voltage = df[v_col].values.copy()
     time = df[t_col].values.copy()
     
@@ -230,12 +182,10 @@ def detect_voltage_steps(df, v_col, t_col, min_step_size=0.05,
     
     for i in range(1, len(voltage_rounded)):
         if abs(voltage_rounded[i] - current_level) > min_step_size / 2:
-            # End of current level
             duration = time[i-1] - time[level_start_idx]
             if duration >= min_duration:
                 levels.append({
                     'V_mean': np.mean(voltage[level_start_idx:i]),
-                    'V_median': np.median(voltage[level_start_idx:i]),
                     'start_idx': level_start_idx,
                     'end_idx': i - 1,
                     'start_time': time[level_start_idx],
@@ -250,7 +200,6 @@ def detect_voltage_steps(df, v_col, t_col, min_step_size=0.05,
     if duration >= min_duration:
         levels.append({
             'V_mean': np.mean(voltage[level_start_idx:]),
-            'V_median': np.median(voltage[level_start_idx:]),
             'start_idx': level_start_idx,
             'end_idx': len(voltage) - 1,
             'start_time': time[level_start_idx],
@@ -260,10 +209,9 @@ def detect_voltage_steps(df, v_col, t_col, min_step_size=0.05,
     
     print(f"\n  Detected {len(levels)} voltage levels:")
     for i, lvl in enumerate(levels):
-        print(f"    Level {i+1}: {lvl['V_mean']:.3f}V for {lvl['duration']:.2f}s "
-              f"(t={lvl['start_time']:.2f}-{lvl['end_time']:.2f}s)")
+        print(f"    Level {i+1}: {lvl['V_mean']:.3f}V for {lvl['duration']:.2f}s")
     
-    # Identify transitions between levels
+    # Identify transitions
     steps = []
     for i in range(1, len(levels)):
         prev_level = levels[i-1]
@@ -279,16 +227,10 @@ def detect_voltage_steps(df, v_col, t_col, min_step_size=0.05,
                 'type': 'RISING' if dV > 0 else 'FALLING',
                 't_start': curr_level['start_time'],
                 't_end': curr_level['end_time'],
-                'duration': curr_level['duration'],
-                'start_idx': curr_level['start_idx'],
-                'end_idx': curr_level['end_idx']
+                'duration': curr_level['duration']
             })
     
-    print(f"\n  Found {len(steps)} voltage transitions:")
-    for step in steps:
-        print(f"    Step {step['step_num']}: {step['V_before']:.3f}V → {step['V_after']:.3f}V "
-              f"({step['type']}, ΔV={abs(step['dV']):.3f}V)")
-    
+    print(f"\n  Found {len(steps)} voltage transitions")
     return steps
 
 
@@ -297,20 +239,7 @@ def detect_voltage_steps(df, v_col, t_col, min_step_size=0.05,
 # =============================================================================
 
 def fit_transient(t, i, t_skip=0.002, t_fit_max=None):
-    """
-    Fit a single transient with 1-exp and 2-exp models.
-    
-    Parameters:
-    -----------
-    t : array - time in seconds (starting from 0)
-    i : array - current in mA
-    t_skip : float - skip initial time to avoid 1/√t singularity
-    t_fit_max : float - max time to fit (None = use all)
-    
-    Returns:
-    --------
-    dict with fit_1exp, fit_2exp, best_model, delta_BIC, t_fit, i_fit
-    """
+    """Fit a single transient with 1-exp and 2-exp models."""
     t = np.asarray(t)
     i = np.asarray(i)
     
@@ -323,7 +252,6 @@ def fit_transient(t, i, t_skip=0.002, t_fit_max=None):
     i_fit = i[mask]
     
     if len(t_fit) < 20:
-        print("    ERROR: Not enough data points")
         return None
     
     n = len(t_fit)
@@ -334,9 +262,7 @@ def fit_transient(t, i, t_skip=0.002, t_fit_max=None):
     B0 = 0.1 * np.sign(A0) if A0 != 0 else 0.1
     C0 = i_fit[-1]
     
-    # =========================================================================
     # 1-EXPONENTIAL FIT
-    # =========================================================================
     try:
         popt_1, pcov_1 = curve_fit(
             model_1exp, t_fit, i_fit,
@@ -357,16 +283,13 @@ def fit_transient(t, i, t_skip=0.002, t_fit_max=None):
             'B': popt_1[2], 'B_err': perr_1[2],
             'C': popt_1[3], 'C_err': perr_1[3],
             'R2': r2_1, 'BIC': bic_1,
-            'ss_res': ss_res_1,
             'i_pred': i_pred_1
         }
     except Exception as e:
         print(f"    1-exp fit failed: {e}")
         return None
     
-    # =========================================================================
     # 2-EXPONENTIAL FIT
-    # =========================================================================
     fit_2exp = None
     try:
         popt_2, pcov_2 = curve_fit(
@@ -378,7 +301,7 @@ def fit_transient(t, i, t_skip=0.002, t_fit_max=None):
         )
         perr_2 = np.sqrt(np.diag(pcov_2))
         
-        # Sort so tau1 < tau2 (fast < slow)
+        # Sort so tau1 < tau2
         A1, tau1, A2, tau2, B, C = popt_2
         A1_err, tau1_err, A2_err, tau2_err, B_err, C_err = perr_2
         
@@ -401,15 +324,12 @@ def fit_transient(t, i, t_skip=0.002, t_fit_max=None):
             'B': B, 'B_err': B_err,
             'C': C, 'C_err': C_err,
             'R2': r2_2, 'BIC': bic_2,
-            'ss_res': ss_res_2,
             'i_pred': i_pred_2
         }
     except Exception as e:
         print(f"    2-exp fit failed: {e}")
     
-    # =========================================================================
-    # MODEL SELECTION
-    # =========================================================================
+    # Model selection
     if fit_2exp is not None:
         delta_bic = fit_2exp['BIC'] - fit_1exp['BIC']
         best_model = '2exp' if delta_bic < -6 else '1exp'
@@ -434,13 +354,8 @@ def fit_transient(t, i, t_skip=0.002, t_fit_max=None):
 def analyze_all_steps(df, t_col, v_col, i_col, 
                       step_duration=4.0, t_skip=0.002, t_fit_max=None,
                       step_type_filter='falling', min_step_size=0.05):
-    """
-    Analyze all voltage steps in the data.
+    """Analyze all voltage steps in the data."""
     
-    Returns:
-    --------
-    results : list of result dicts
-    """
     print("\n" + "="*70)
     print("VOLTAGE-STEPPED CHRONOAMPEROMETRY ANALYSIS")
     print("="*70)
@@ -458,8 +373,6 @@ def analyze_all_steps(df, t_col, v_col, i_col,
     elif step_type_filter.lower() == 'rising':
         steps = [s for s in steps if s['type'] == 'RISING']
         print(f"\n  Filtering to RISING only: {len(steps)} steps")
-    else:
-        print(f"\n  Using all steps: {len(steps)} steps")
     
     if len(steps) == 0:
         print("  No steps found!")
@@ -468,11 +381,7 @@ def analyze_all_steps(df, t_col, v_col, i_col,
     results = []
     
     for step in steps:
-        print(f"\n{'='*70}")
-        print(f"STEP {step['step_num']}: {step['V_before']:.3f}V → {step['V_after']:.3f}V ({step['type']})")
-        print(f"ΔV = {abs(step['dV']):.3f}V, Duration = {step['duration']:.2f}s")
-        print(f"t = {step['t_start']:.3f}s to {step['t_end']:.3f}s")
-        print("="*70)
+        print(f"\nStep {step['step_num']}: {step['V_before']:.3f}V → {step['V_after']:.3f}V ({step['type']})")
         
         # Extract segment
         actual_duration = min(step['duration'], step_duration)
@@ -485,7 +394,6 @@ def analyze_all_steps(df, t_col, v_col, i_col,
             print("  Skipping: not enough points")
             continue
         
-        # Reset time to start at 0
         t0 = df_seg[t_col].iloc[0]
         t = df_seg[t_col].values - t0
         current = df_seg[i_col].values
@@ -496,31 +404,6 @@ def analyze_all_steps(df, t_col, v_col, i_col,
         if fit_result is None:
             continue
         
-        # Print results
-        f1 = fit_result['fit_1exp']
-        f2 = fit_result['fit_2exp']
-        
-        print(f"\n--- 1-EXPONENTIAL MODEL ---")
-        print(f"  A   = {f1['A']:+.4f} ± {f1['A_err']:.4f} mA")
-        print(f"  τ   = {f1['tau']*1000:.2f} ± {f1['tau_err']*1000:.2f} ms")
-        print(f"  B   = {f1['B']:+.5f} ± {f1['B_err']:.5f} mA·s^0.5")
-        print(f"  C   = {f1['C']:+.4f} ± {f1['C_err']:.4f} mA")
-        print(f"  R²  = {f1['R2']:.6f}")
-        print(f"  BIC = {f1['BIC']:.1f}")
-        
-        if f2 is not None:
-            print(f"\n--- 2-EXPONENTIAL MODEL ---")
-            print(f"  A₁  = {f2['A1']:+.4f} ± {f2['A1_err']:.4f} mA  (τ₁ = {f2['tau1']*1000:.2f} ms) [FAST]")
-            print(f"  A₂  = {f2['A2']:+.4f} ± {f2['A2_err']:.4f} mA  (τ₂ = {f2['tau2']*1000:.2f} ms) [SLOW]")
-            print(f"  B   = {f2['B']:+.5f} ± {f2['B_err']:.5f} mA·s^0.5")
-            print(f"  C   = {f2['C']:+.4f} ± {f2['C_err']:.4f} mA")
-            print(f"  R²  = {f2['R2']:.6f}")
-            print(f"  BIC = {f2['BIC']:.1f}")
-            print(f"\n  ΔBIC = {fit_result['delta_BIC']:.1f} (negative favors 2-exp)")
-            print(f"  τ₂/τ₁ = {f2['tau2']/f2['tau1']:.1f}x separation")
-        
-        print(f"\n  >>> BEST MODEL: {fit_result['best_model'].upper()} <<<")
-        
         # Store result
         result = {
             'step': step['step_num'],
@@ -529,379 +412,249 @@ def analyze_all_steps(df, t_col, v_col, i_col,
             'V_final': step['V_after'],
             'dV': abs(step['dV']),
             't_start': step['t_start'],
-            't_end': step['t_end'],
             'fit_result': fit_result,
             't_data': t,
             'i_data': current
         }
         results.append(result)
+        
+        print(f"  1-exp: R²={fit_result['fit_1exp']['R2']:.5f}, τ={fit_result['fit_1exp']['tau']*1000:.1f}ms")
+        if fit_result['fit_2exp']:
+            print(f"  2-exp: R²={fit_result['fit_2exp']['R2']:.5f}, τ₁={fit_result['fit_2exp']['tau1']*1000:.1f}ms, τ₂={fit_result['fit_2exp']['tau2']*1000:.1f}ms")
+            print(f"  Best: {fit_result['best_model'].upper()}")
     
     return results
 
 
 # =============================================================================
-# PLOTTING FUNCTIONS
+# COMPREHENSIVE SUMMARY OUTPUT
 # =============================================================================
 
-def plot_all_fits(results, save_prefix='fits'):
-    """Plot all fits with residuals."""
-    n = len(results)
-    if n == 0:
-        print("No results to plot")
-        return
+def create_comprehensive_summary(results, output_prefix='analysis'):
+    """
+    Create comprehensive summary DataFrame with all coefficients for both models.
+    Includes derived quantities for Bazant and PCET/CER analysis.
+    """
     
-    fig, axes = plt.subplots(2, n, figsize=(5*n, 8))
-    if n == 1:
-        axes = axes.reshape(2, 1)
-    
-    for i, res in enumerate(results):
-        fit = res['fit_result']
-        t_ms = fit['t_fit'] * 1000
-        i_data = fit['i_fit']
-        f1 = fit['fit_1exp']
-        f2 = fit['fit_2exp']
-        
-        # Main plot
-        ax = axes[0, i]
-        ax.plot(t_ms, i_data, 'k.', markersize=1, alpha=0.3, label='Data')
-        ax.plot(t_ms, f1['i_pred'], 'b-', lw=2, label=f"1-exp R²={f1['R2']:.5f}")
-        
-        if f2 is not None:
-            ax.plot(t_ms, f2['i_pred'], 'r--', lw=2, label=f"2-exp R²={f2['R2']:.5f}")
-        
-        ax.set_xlabel('Time (ms)')
-        ax.set_ylabel('Current (mA)')
-        ax.set_title(f"Step {res['step']}: {res['V_initial']:.2f}→{res['V_final']:.2f}V\n"
-                    f"Best: {fit['best_model'].upper()}")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim([0, min(500, t_ms.max())])
-        
-        # Residuals
-        ax = axes[1, i]
-        res_1 = i_data - f1['i_pred']
-        ax.plot(t_ms, res_1, 'b.', ms=1, alpha=0.5, label='1-exp')
-        
-        if f2 is not None:
-            res_2 = i_data - f2['i_pred']
-            ax.plot(t_ms, res_2, 'r.', ms=1, alpha=0.5, label='2-exp')
-        
-        ax.axhline(0, color='k', lw=0.5)
-        ax.set_xlabel('Time (ms)')
-        ax.set_ylabel('Residual (mA)')
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim([0, min(500, t_ms.max())])
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_all_fits.png', dpi=150)
-    plt.show()
-    print(f"Saved: {save_prefix}_all_fits.png")
-
-
-def plot_model_comparison(results, save_prefix='fits'):
-    """Compare 1-exp vs 2-exp models across all steps."""
-    # Filter to those with 2-exp fits
-    results_2exp = [r for r in results if r['fit_result']['fit_2exp'] is not None]
-    
-    if len(results_2exp) < 1:
-        print("No 2-exp fits to compare")
-        return
-    
-    n = len(results_2exp)
-    
-    fig, axes = plt.subplots(2, 3, figsize=(14, 9))
-    
-    # Extract data
-    steps = [r['step'] for r in results_2exp]
-    r2_1exp = [r['fit_result']['fit_1exp']['R2'] for r in results_2exp]
-    r2_2exp = [r['fit_result']['fit_2exp']['R2'] for r in results_2exp]
-    delta_bic = [r['fit_result']['delta_BIC'] for r in results_2exp]
-    tau_1exp = [r['fit_result']['fit_1exp']['tau']*1000 for r in results_2exp]
-    tau1 = [r['fit_result']['fit_2exp']['tau1']*1000 for r in results_2exp]
-    tau2 = [r['fit_result']['fit_2exp']['tau2']*1000 for r in results_2exp]
-    B_1exp = [abs(r['fit_result']['fit_1exp']['B']) for r in results_2exp]
-    B_2exp = [abs(r['fit_result']['fit_2exp']['B']) for r in results_2exp]
-    
-    x = np.arange(n)
-    width = 0.35
-    
-    # R² comparison
-    ax = axes[0, 0]
-    ax.bar(x - width/2, r2_1exp, width, label='1-exp', color='blue', alpha=0.7)
-    ax.bar(x + width/2, r2_2exp, width, label='2-exp', color='red', alpha=0.7)
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Step {s}" for s in steps])
-    ax.set_ylabel('R²')
-    ax.set_title('Goodness of Fit')
-    ax.legend()
-    ax.set_ylim([min(0.99, min(r2_1exp + r2_2exp) - 0.005), 1.001])
-    ax.grid(True, alpha=0.3)
-    
-    # ΔBIC
-    ax = axes[0, 1]
-    colors = ['green' if d < -6 else 'orange' if d < 0 else 'gray' for d in delta_bic]
-    ax.bar(x, delta_bic, color=colors, alpha=0.7, edgecolor='black')
-    ax.axhline(-6, color='green', ls='--', lw=2, label='Strong evidence for 2-exp')
-    ax.axhline(0, color='black', lw=0.5)
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Step {s}" for s in steps])
-    ax.set_ylabel('ΔBIC (2exp - 1exp)')
-    ax.set_title('Model Selection\n(negative = 2-exp better)')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    # Time constants
-    ax = axes[0, 2]
-    ax.bar(x - width, tau_1exp, width, label='1-exp: τ', color='gray', alpha=0.7)
-    ax.bar(x, tau1, width, label='2-exp: τ₁ (fast)', color='red', alpha=0.7)
-    ax.bar(x + width, tau2, width, label='2-exp: τ₂ (slow)', color='blue', alpha=0.7)
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Step {s}" for s in steps])
-    ax.set_ylabel('τ (ms)')
-    ax.set_title('Time Constants')
-    ax.legend(fontsize=9)
-    ax.set_yscale('log')
-    ax.grid(True, alpha=0.3)
-    
-    # τ₂/τ₁ ratio
-    ax = axes[1, 0]
-    tau_ratio = np.array(tau2) / np.array(tau1)
-    colors = ['red' if r['type'] == 'RISING' else 'blue' for r in results_2exp]
-    ax.bar(x, tau_ratio, color=colors, alpha=0.7, edgecolor='black')
-    ax.axhline(3, color='green', ls='--', label='3x separation')
-    ax.axhline(5, color='orange', ls='--', label='5x separation')
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Step {s}" for s in steps])
-    ax.set_ylabel('τ₂/τ₁ ratio')
-    ax.set_title('Time Scale Separation')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    # B comparison
-    ax = axes[1, 1]
-    ax.bar(x - width/2, B_1exp, width, label='1-exp: |B|', color='blue', alpha=0.7)
-    ax.bar(x + width/2, B_2exp, width, label='2-exp: |B|', color='red', alpha=0.7)
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Step {s}" for s in steps])
-    ax.set_ylabel('|B| (mA·s^0.5)')
-    ax.set_title('Diffusion Term')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    # Amplitudes
-    ax = axes[1, 2]
-    A_1exp = [abs(r['fit_result']['fit_1exp']['A']) for r in results_2exp]
-    A1 = [abs(r['fit_result']['fit_2exp']['A1']) for r in results_2exp]
-    A2 = [abs(r['fit_result']['fit_2exp']['A2']) for r in results_2exp]
-    ax.bar(x - width, A_1exp, width, label='1-exp: |A|', color='gray', alpha=0.7)
-    ax.bar(x, A1, width, label='2-exp: |A₁|', color='red', alpha=0.7)
-    ax.bar(x + width, A2, width, label='2-exp: |A₂|', color='blue', alpha=0.7)
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Step {s}" for s in steps])
-    ax.set_ylabel('|Amplitude| (mA)')
-    ax.set_title('Amplitudes')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_model_comparison.png', dpi=150)
-    plt.show()
-    print(f"Saved: {save_prefix}_model_comparison.png")
-
-
-def plot_parameters_vs_voltage(results, save_prefix='fits'):
-    """Plot fit parameters vs voltage."""
-    if len(results) < 2:
-        print("Need at least 2 steps for parameter plots")
-        return
-    
-    # Extract data
-    data = []
-    for res in results:
-        f1 = res['fit_result']['fit_1exp']
-        f2 = res['fit_result']['fit_2exp']
-        
-        # Use V_initial for falling, V_final for rising (for symmetry comparison)
-        if res['type'] == 'FALLING':
-            V_plot = res['V_initial']
-        else:
-            V_plot = res['V_final']
-        
-        row = {
-            'V': V_plot,
-            'type': res['type'],
-            'dV': res['dV'],
-            'A': f1['A'],
-            'tau': f1['tau'] * 1000,
-            'B': f1['B'],
-            'C': f1['C'],
-            'R2': f1['R2']
-        }
-        if f2 is not None:
-            row['tau1'] = f2['tau1'] * 1000
-            row['tau2'] = f2['tau2'] * 1000
-            row['B_2exp'] = f2['B']
-        data.append(row)
-    
-    df = pd.DataFrame(data)
-    
-    fig, axes = plt.subplots(2, 3, figsize=(14, 9))
-    
-    colors = ['red' if t == 'RISING' else 'blue' for t in df['type']]
-    markers = ['^' if t == 'RISING' else 'v' for t in df['type']]
-    
-    # |A| vs V
-    ax = axes[0, 0]
-    for i, row in df.iterrows():
-        ax.scatter(row['V'], abs(row['A']), c=colors[i], marker=markers[i], s=120, edgecolor='k')
-    ax.set_xlabel('Voltage (V)')
-    ax.set_ylabel('|A| (mA)')
-    ax.set_title('Amplitude vs Voltage')
-    ax.grid(True, alpha=0.3)
-    
-    # τ vs V
-    ax = axes[0, 1]
-    for i, row in df.iterrows():
-        ax.scatter(row['V'], row['tau'], c=colors[i], marker=markers[i], s=120, edgecolor='k')
-    ax.set_xlabel('Voltage (V)')
-    ax.set_ylabel('τ (ms)')
-    ax.set_title('Time Constant vs Voltage')
-    ax.grid(True, alpha=0.3)
-    
-    # |B| vs V
-    ax = axes[0, 2]
-    for i, row in df.iterrows():
-        ax.scatter(row['V'], abs(row['B']), c=colors[i], marker=markers[i], s=120, edgecolor='k')
-    ax.set_xlabel('Voltage (V)')
-    ax.set_ylabel('|B| (mA·s^0.5)')
-    ax.set_title('Diffusion Term vs Voltage')
-    ax.grid(True, alpha=0.3)
-    
-    # |B| vs ΔV (BAZANT TEST)
-    ax = axes[1, 0]
-    dV = df['dV'].values
-    B_abs = np.abs(df['B'].values)
-    
-    for i, row in df.iterrows():
-        ax.scatter(row['dV'], abs(row['B']), c=colors[i], marker=markers[i], s=120, edgecolor='k')
-    
-    if len(dV) >= 2:
-        slope, intercept, r_val, p_val, _ = linregress(dV, B_abs)
-        x_fit = np.linspace(0, dV.max()*1.1, 100)
-        ax.plot(x_fit, slope*x_fit + intercept, 'k--', lw=2,
-               label=f'|B| = {slope:.3f}·ΔV + {intercept:.4f}\nR² = {r_val**2:.4f}')
-        ax.legend(fontsize=9)
-    
-    ax.set_xlabel('|ΔV| (V)')
-    ax.set_ylabel('|B| (mA·s^0.5)')
-    ax.set_title('B vs ΔV (Bazant Test)')
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim([0, None])
-    ax.set_ylim([0, None])
-    
-    # |B|/ΔV consistency
-    ax = axes[1, 1]
-    B_over_dV = np.abs(df['B']) / df['dV']
-    x_pos = np.arange(len(df))
-    ax.bar(x_pos, B_over_dV, color=colors, edgecolor='k', alpha=0.7)
-    ax.axhline(B_over_dV.mean(), color='green', ls='--', lw=2,
-              label=f'Mean = {B_over_dV.mean():.3f} ± {B_over_dV.std():.3f}')
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels([f"S{i+1}" for i in x_pos])
-    ax.set_ylabel('|B|/ΔV (mA·s^0.5/V)')
-    ax.set_title('|B|/ΔV Consistency')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    # C vs V (steady-state current)
-    ax = axes[1, 2]
-    for i, row in df.iterrows():
-        ax.scatter(row['V'], row['C'], c=colors[i], marker=markers[i], s=120, edgecolor='k')
-    ax.set_xlabel('Voltage (V)')
-    ax.set_ylabel('C (mA)')
-    ax.set_title('Steady-State Current vs Voltage')
-    ax.grid(True, alpha=0.3)
-    
-    # Add legend
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], marker='^', color='w', markerfacecolor='red', markersize=12, label='Rising'),
-        Line2D([0], [0], marker='v', color='w', markerfacecolor='blue', markersize=12, label='Falling')
-    ]
-    fig.legend(handles=legend_elements, loc='upper right', fontsize=10)
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_parameters.png', dpi=150)
-    plt.show()
-    print(f"Saved: {save_prefix}_parameters.png")
-
-
-def plot_summary_table(results, save_prefix='fits'):
-    """Create and save summary table."""
     rows = []
+    
     for res in results:
         f1 = res['fit_result']['fit_1exp']
         f2 = res['fit_result']['fit_2exp']
+        dV = res['dV']
+        
+        # Calculate derived quantities for 1-exp
+        Q_exp_1 = abs(f1['A']) * f1['tau'] * 1000  # mC (charge from exp term)
+        B_over_dV_1 = abs(f1['B']) / dV if dV > 0 else np.nan
         
         row = {
+            # Step info
             'Step': res['step'],
             'Type': res['type'],
-            'V_i (V)': f"{res['V_initial']:.3f}",
-            'V_f (V)': f"{res['V_final']:.3f}",
-            'ΔV (V)': f"{res['dV']:.3f}",
-            'A (mA)': f"{f1['A']:.3f}",
-            'τ (ms)': f"{f1['tau']*1000:.2f}",
-            'B': f"{f1['B']:.5f}",
-            'C (mA)': f"{f1['C']:.3f}",
-            'R²': f"{f1['R2']:.5f}",
-            '|B|/ΔV': f"{abs(f1['B'])/res['dV']:.3f}"
+            'V_initial_RHE': res['V_initial'],
+            'V_final_RHE': res['V_final'],
+            'dV': dV,
+            
+            # 1-EXP MODEL PARAMETERS
+            'A_1exp (mA)': f1['A'],
+            'A_1exp_err': f1['A_err'],
+            'tau_1exp (ms)': f1['tau'] * 1000,
+            'tau_1exp_err (ms)': f1['tau_err'] * 1000,
+            'B_1exp (mA·s^0.5)': f1['B'],
+            'B_1exp_err': f1['B_err'],
+            'C_1exp (mA)': f1['C'],
+            'C_1exp_err': f1['C_err'],
+            'R2_1exp': f1['R2'],
+            'BIC_1exp': f1['BIC'],
+            
+            # 1-EXP DERIVED QUANTITIES
+            '|A|_1exp': abs(f1['A']),
+            '|B|_1exp': abs(f1['B']),
+            '|B|/dV_1exp': B_over_dV_1,
+            'Q_exp_1exp (mC)': Q_exp_1,
         }
         
+        # 2-EXP MODEL PARAMETERS
         if f2 is not None:
-            row['τ₁ (ms)'] = f"{f2['tau1']*1000:.2f}"
-            row['τ₂ (ms)'] = f"{f2['tau2']*1000:.2f}"
-            row['R²_2exp'] = f"{f2['R2']:.5f}"
-            row['ΔBIC'] = f"{res['fit_result']['delta_BIC']:.1f}"
-            row['Best'] = res['fit_result']['best_model']
+            Q_fast = abs(f2['A1']) * f2['tau1'] * 1000  # mC
+            Q_slow = abs(f2['A2']) * f2['tau2'] * 1000  # mC
+            Q_total_2exp = Q_fast + Q_slow
+            B_over_dV_2 = abs(f2['B']) / dV if dV > 0 else np.nan
+            tau_ratio = f2['tau2'] / f2['tau1']
+            A_ratio = abs(f2['A1']) / abs(f2['A2']) if abs(f2['A2']) > 0 else np.nan
+            
+            row.update({
+                # Fast component (τ₁)
+                'A1_2exp (mA)': f2['A1'],
+                'A1_2exp_err': f2['A1_err'],
+                'tau1_2exp (ms)': f2['tau1'] * 1000,
+                'tau1_2exp_err (ms)': f2['tau1_err'] * 1000,
+                
+                # Slow component (τ₂)
+                'A2_2exp (mA)': f2['A2'],
+                'A2_2exp_err': f2['A2_err'],
+                'tau2_2exp (ms)': f2['tau2'] * 1000,
+                'tau2_2exp_err (ms)': f2['tau2_err'] * 1000,
+                
+                # Diffusion and steady-state
+                'B_2exp (mA·s^0.5)': f2['B'],
+                'B_2exp_err': f2['B_err'],
+                'C_2exp (mA)': f2['C'],
+                'C_2exp_err': f2['C_err'],
+                
+                # Quality metrics
+                'R2_2exp': f2['R2'],
+                'BIC_2exp': f2['BIC'],
+                'delta_BIC': res['fit_result']['delta_BIC'],
+                'Best_Model': res['fit_result']['best_model'],
+                
+                # 2-EXP DERIVED QUANTITIES
+                '|A1|_2exp': abs(f2['A1']),
+                '|A2|_2exp': abs(f2['A2']),
+                '|B|_2exp': abs(f2['B']),
+                '|B|/dV_2exp': B_over_dV_2,
+                'tau2/tau1': tau_ratio,
+                '|A1|/|A2|': A_ratio,
+                'Q_fast (mC)': Q_fast,
+                'Q_slow (mC)': Q_slow,
+                'Q_total_2exp (mC)': Q_total_2exp,
+                'Q_fast/Q_total': Q_fast / Q_total_2exp if Q_total_2exp > 0 else np.nan,
+            })
+        else:
+            # Fill with NaN if 2-exp not available
+            row.update({
+                'A1_2exp (mA)': np.nan, 'A1_2exp_err': np.nan,
+                'tau1_2exp (ms)': np.nan, 'tau1_2exp_err (ms)': np.nan,
+                'A2_2exp (mA)': np.nan, 'A2_2exp_err': np.nan,
+                'tau2_2exp (ms)': np.nan, 'tau2_2exp_err (ms)': np.nan,
+                'B_2exp (mA·s^0.5)': np.nan, 'B_2exp_err': np.nan,
+                'C_2exp (mA)': np.nan, 'C_2exp_err': np.nan,
+                'R2_2exp': np.nan, 'BIC_2exp': np.nan,
+                'delta_BIC': np.nan, 'Best_Model': '1exp',
+                '|A1|_2exp': np.nan, '|A2|_2exp': np.nan,
+                '|B|_2exp': np.nan, '|B|/dV_2exp': np.nan,
+                'tau2/tau1': np.nan, '|A1|/|A2|': np.nan,
+                'Q_fast (mC)': np.nan, 'Q_slow (mC)': np.nan,
+                'Q_total_2exp (mC)': np.nan, 'Q_fast/Q_total': np.nan,
+            })
         
         rows.append(row)
     
     summary_df = pd.DataFrame(rows)
     
     # Save to CSV
-    summary_df.to_csv(f'{save_prefix}_results.csv', index=False)
-    print(f"Saved: {save_prefix}_results.csv")
+    csv_path = f'{output_prefix}_comprehensive_summary.csv'
+    summary_df.to_csv(csv_path, index=False)
+    print(f"\nSaved: {csv_path}")
     
-    # Create figure
-    fig, ax = plt.subplots(figsize=(16, max(3, len(rows)*0.5 + 1)))
-    ax.axis('off')
-    
-    table = ax.table(
-        cellText=summary_df.values,
-        colLabels=summary_df.columns,
-        cellLoc='center',
-        loc='center',
-        colColours=['lightblue']*len(summary_df.columns)
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1.2, 1.5)
-    
-    # Color rows by type
-    for i in range(len(rows)):
-        color = '#ffcccc' if rows[i]['Type'] == 'RISING' else '#ccccff'
-        for j in range(len(summary_df.columns)):
-            table[(i+1, j)].set_facecolor(color)
-    
-    ax.set_title('Fit Results Summary', fontsize=14, pad=20)
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_table.png', dpi=150, bbox_inches='tight')
-    plt.show()
-    print(f"Saved: {save_prefix}_table.png")
+    # Also save to Excel with formatting
+    try:
+        excel_path = f'{output_prefix}_comprehensive_summary.xlsx'
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            summary_df.to_excel(writer, sheet_name='All_Parameters', index=False)
+            
+            # Create a condensed sheet for quick reference
+            condensed_cols = [
+                'Step', 'Type', 'V_initial_RHE', 'V_final_RHE', 'dV',
+                'tau_1exp (ms)', 'R2_1exp', '|B|/dV_1exp',
+                'tau1_2exp (ms)', 'tau2_2exp (ms)', 'tau2/tau1',
+                'R2_2exp', '|B|/dV_2exp', 'delta_BIC', 'Best_Model'
+            ]
+            condensed_df = summary_df[[c for c in condensed_cols if c in summary_df.columns]]
+            condensed_df.to_excel(writer, sheet_name='Quick_Reference', index=False)
+        
+        print(f"Saved: {excel_path}")
+    except Exception as e:
+        print(f"Excel save failed (openpyxl not available): {e}")
     
     return summary_df
+
+
+def print_bazant_analysis(results):
+    """Print Bazant analysis summary."""
+    
+    print("\n" + "="*70)
+    print("BAZANT ANALYSIS (B vs ΔV)")
+    print("="*70)
+    
+    if len(results) < 2:
+        print("Need at least 2 steps for Bazant analysis")
+        return
+    
+    # 1-exp B values
+    dV = np.array([r['dV'] for r in results])
+    B_1exp = np.array([abs(r['fit_result']['fit_1exp']['B']) for r in results])
+    
+    slope_1, intercept_1, r_val_1, p_val_1, _ = linregress(dV, B_1exp)
+    
+    print("\n1-EXP MODEL:")
+    print(f"  |B| = {slope_1:.4f}·ΔV + {intercept_1:.5f}")
+    print(f"  R² = {r_val_1**2:.4f}")
+    print(f"  p-value = {p_val_1:.2e}")
+    print(f"  Mean |B|/ΔV = {np.mean(B_1exp/dV):.4f} ± {np.std(B_1exp/dV):.4f}")
+    
+    # 2-exp B values
+    results_2exp = [r for r in results if r['fit_result']['fit_2exp'] is not None]
+    if len(results_2exp) >= 2:
+        dV_2 = np.array([r['dV'] for r in results_2exp])
+        B_2exp = np.array([abs(r['fit_result']['fit_2exp']['B']) for r in results_2exp])
+        
+        slope_2, intercept_2, r_val_2, p_val_2, _ = linregress(dV_2, B_2exp)
+        
+        print("\n2-EXP MODEL:")
+        print(f"  |B| = {slope_2:.4f}·ΔV + {intercept_2:.5f}")
+        print(f"  R² = {r_val_2**2:.4f}")
+        print(f"  p-value = {p_val_2:.2e}")
+        print(f"  Mean |B|/ΔV = {np.mean(B_2exp/dV_2):.4f} ± {np.std(B_2exp/dV_2):.4f}")
+
+
+def print_pcet_cer_analysis(results):
+    """Print PCET/CER analysis summary."""
+    
+    print("\n" + "="*70)
+    print("PCET/CER ANALYSIS (Time Constants)")
+    print("="*70)
+    
+    results_2exp = [r for r in results if r['fit_result']['fit_2exp'] is not None]
+    
+    if len(results_2exp) == 0:
+        print("No 2-exp fits available")
+        return
+    
+    print("\n2-EXP MODEL TIME CONSTANTS:")
+    print("-"*60)
+    print(f"{'Step':<6} {'Type':<8} {'V_i':<6} {'τ₁(ms)':<10} {'τ₂(ms)':<10} {'τ₂/τ₁':<8} {'|A₁|/|A₂|':<10}")
+    print("-"*60)
+    
+    tau1_all = []
+    tau2_all = []
+    ratio_all = []
+    
+    for res in results_2exp:
+        f2 = res['fit_result']['fit_2exp']
+        tau1 = f2['tau1'] * 1000
+        tau2 = f2['tau2'] * 1000
+        ratio = tau2 / tau1
+        A_ratio = abs(f2['A1']) / abs(f2['A2']) if abs(f2['A2']) > 0 else np.nan
+        
+        tau1_all.append(tau1)
+        tau2_all.append(tau2)
+        ratio_all.append(ratio)
+        
+        print(f"{res['step']:<6} {res['type']:<8} {res['V_initial']:<6.2f} {tau1:<10.2f} {tau2:<10.2f} {ratio:<8.1f} {A_ratio:<10.2f}")
+    
+    print("-"*60)
+    print(f"{'Mean':<6} {'':<8} {'':<6} {np.mean(tau1_all):<10.2f} {np.mean(tau2_all):<10.2f} {np.mean(ratio_all):<8.1f}")
+    print(f"{'Std':<6} {'':<8} {'':<6} {np.std(tau1_all):<10.2f} {np.std(tau2_all):<10.2f} {np.std(ratio_all):<8.1f}")
+    
+    print("\nINTERPRETATION:")
+    mean_ratio = np.mean(ratio_all)
+    if mean_ratio > 3:
+        print(f"  τ₂/τ₁ = {mean_ratio:.1f}x → Good time-scale separation")
+        print("  τ₁ (fast): Surface PCET / CER kinetics")
+        print("  τ₂ (slow): Bulk oxide proton diffusion / slow PCET")
+    else:
+        print(f"  τ₂/τ₁ = {mean_ratio:.1f}x → Limited separation, may be single process")
 
 
 # =============================================================================
@@ -911,42 +664,14 @@ def plot_summary_table(results, save_prefix='fits'):
 def main():
     """Main entry point."""
     
-    # # Parse arguments
-    # if len(sys.argv) < 2:
-    #     print(__doc__)
-    #     print("\nNo input file specified. Run with: python fit_transient_2exp.py data.csv")
-    #     sys.exit(1)
-    
-    # filepath = sys.argv[1]
-    
-    # # Step type filter
     step_type_filter = 'falling'  # default
-    # if len(sys.argv) >= 3:
-    #     if sys.argv[2].lower() in ['rising', 'falling', 'both']:
-    #         step_type_filter = sys.argv[2].lower()
     
-    # # Parse optional arguments
-    # sep = None
-    # decimal = '.'
-    
-    # for arg in sys.argv[3:]:
-    #     if arg.startswith('--sep='):
-    #         sep = arg.split('=')[1]
-    #         if sep == '\\t':
-    #             sep = '\t'
-    #     elif arg.startswith('--decimal='):
-    #         decimal = arg.split('=')[1]
-    
-    # print(f"\n{'='*70}")
-    # print(f"Two-Exponential Chronoamperometry Fitting")
-    # print(f"{'='*70}")
-    # print(f"File: {filepath}")
-    # print(f"Step filter: {step_type_filter}")
-    # print(f"Decimal separator: '{decimal}'")
+    # USER CONFIGURATION - MODIFY HERE
     filepath = 'CER_1500mM_20241120_28_pulse_590mV_N_S1_CER_02_CA_C02.txt'
     CBGa = -0.0117
+    
     # Load data
-    df, t_col, v_col, i_col = load_data(filepath, sep=r'\s+', decimal=',',CBG=CBGa)
+    df, t_col, v_col, i_col = load_data(filepath, sep=r'\s+', decimal=',', CBG=CBGa)
     
     # Analyze
     results = analyze_all_steps(
@@ -963,65 +688,41 @@ def main():
         sys.exit(1)
     
     # Generate output prefix from filename
-    output_prefix = os.path.splitext(os.path.basename(filepath))[0] + '_fits'
+    output_prefix = os.path.splitext(os.path.basename(filepath))[0]
     
-    # Plots
-    print(f"\n{'='*70}")
-    print("GENERATING PLOTS")
-    print(f"{'='*70}")
+    # Create comprehensive summary
+    print("\n" + "="*70)
+    print("GENERATING COMPREHENSIVE SUMMARY")
+    print("="*70)
     
-    plot_all_fits(results, save_prefix=output_prefix)
-    plot_model_comparison(results, save_prefix=output_prefix)
-    plot_parameters_vs_voltage(results, save_prefix=output_prefix)
-    summary_df = plot_summary_table(results, save_prefix=output_prefix)
+    summary_df = create_comprehensive_summary(results, output_prefix=output_prefix)
     
-    # Summary statistics
-    print(f"\n{'='*70}")
-    print("SUMMARY STATISTICS")
-    print(f"{'='*70}")
+    # Print analysis summaries
+    print_bazant_analysis(results)
+    print_pcet_cer_analysis(results)
+    
+    # Print final summary
+    print("\n" + "="*70)
+    print("FINAL SUMMARY")
+    print("="*70)
     
     n_1exp = sum(1 for r in results if r['fit_result']['best_model'] == '1exp')
     n_2exp = sum(1 for r in results if r['fit_result']['best_model'] == '2exp')
-    print(f"\nModel selection:")
-    print(f"  1-exp preferred: {n_1exp} steps")
-    print(f"  2-exp preferred: {n_2exp} steps")
     
-    rising = [r for r in results if r['type'] == 'RISING']
-    falling = [r for r in results if r['type'] == 'FALLING']
+    print(f"\nTotal steps analyzed: {len(results)}")
+    print(f"  1-exp preferred: {n_1exp}")
+    print(f"  2-exp preferred: {n_2exp}")
     
-    if len(rising) > 0:
-        tau_rise = [r['fit_result']['fit_1exp']['tau']*1000 for r in rising]
-        print(f"\nRISING steps ({len(rising)}):")
-        print(f"  τ mean: {np.mean(tau_rise):.1f} ± {np.std(tau_rise):.1f} ms")
+    print(f"\nOutput files:")
+    print(f"  {output_prefix}_comprehensive_summary.csv")
+    print(f"  {output_prefix}_comprehensive_summary.xlsx")
     
-    if len(falling) > 0:
-        tau_fall = [r['fit_result']['fit_1exp']['tau']*1000 for r in falling]
-        print(f"\nFALLING steps ({len(falling)}):")
-        print(f"  τ mean: {np.mean(tau_fall):.1f} ± {np.std(tau_fall):.1f} ms")
-    
-    # Bazant test
-    if len(results) >= 2:
-        dV = np.array([r['dV'] for r in results])
-        B_abs = np.array([abs(r['fit_result']['fit_1exp']['B']) for r in results])
-        slope, intercept, r_val, p_val, _ = linregress(dV, B_abs)
-        
-        print(f"\nBAZANT TEST (B vs ΔV):")
-        print(f"  |B| = {slope:.4f}·ΔV + {intercept:.4f}")
-        print(f"  R² = {r_val**2:.4f}")
-        print(f"  p-value = {p_val:.2e}")
-        if r_val**2 > 0.9:
-            print(f"  ✓ Strong linear relationship - supports Bazant bulk diffusion")
-        elif r_val**2 > 0.7:
-            print(f"  ~ Moderate linearity")
-        else:
-            print(f"  ⚠ Weak linearity - may indicate other effects")
-    
-    print(f"\n{'='*70}")
+    print("\n" + "="*70)
     print("DONE")
-    print(f"{'='*70}")
+    print("="*70)
     
-    return results
+    return results, summary_df
 
 
 if __name__ == '__main__':
-    results = main()
+    results, summary_df = main()
