@@ -10,8 +10,18 @@ Automatically:
 
 Usage:
     python fit_voltage_steps.py your_data.csv
+    python fit_voltage_steps.py your_data.xlsx SheetName
+    python fit_voltage_steps.py your_data.xlsx SheetName falling
     
-Expected columns: 'time/s', 'Ewe/V', 'I/mA'
+Arguments:
+    file      : CSV or Excel file with electrochemistry data
+    sheet     : (optional) Sheet name for Excel files
+    step_type : (optional) 'rising', 'falling', or 'both' (default: 'falling')
+    
+Expected columns: 'time/s', 'Ewe/V', 'I/mA' (or similar, auto-detected)
+
+Note: Rising steps often have poor fits due to additional physics 
+      (OER, bubble formation). Default is to fit only falling steps.
 """
 
 import numpy as np
@@ -136,7 +146,8 @@ def fit_single_step(t, i, step_type='FALLING', t_fit_max=None):
 # =============================================================================
 
 def analyze_voltage_steps(df, t_col='time/s', v_col='Ewe/V', i_col='I/mA',
-                          step_duration=4.0, t_skip=0.001, t_fit_max=None):
+                          step_duration=4.0, t_skip=0.001, t_fit_max=None,
+                          step_type_filter='both'):
     """
     Analyze all voltage steps in the data.
     
@@ -146,6 +157,7 @@ def analyze_voltage_steps(df, t_col='time/s', v_col='Ewe/V', i_col='I/mA',
     step_duration : float - expected duration of each step (seconds)
     t_skip : float - time to skip at start of each step
     t_fit_max : float - max time to fit (None = use step_duration)
+    step_type_filter : str - 'rising', 'falling', or 'both'
     
     Returns:
     --------
@@ -154,6 +166,14 @@ def analyze_voltage_steps(df, t_col='time/s', v_col='Ewe/V', i_col='I/mA',
     # Detect steps
     steps = detect_voltage_steps(df, v_col=v_col)
     print(f"Found {len(steps)} voltage steps")
+    
+    # Filter by step type if requested
+    if step_type_filter.lower() == 'falling':
+        steps = [s for s in steps if s['type'] == 'FALLING']
+        print(f"  Filtering to FALLING only: {len(steps)} steps")
+    elif step_type_filter.lower() == 'rising':
+        steps = [s for s in steps if s['type'] == 'RISING']
+        print(f"  Filtering to RISING only: {len(steps)} steps")
     
     results = []
     
@@ -461,6 +481,7 @@ if __name__ == '__main__':
     STEP_DURATION = 4.0    # Max duration to consider for each step (s)
     T_SKIP = 0.002         # Time to skip at start of step (s) - avoid t=0 singularity
     T_FIT_MAX = None       # Max time to include in fit (None = use all data)
+    STEP_TYPE_FILTER = 'falling'  # 'rising', 'falling', or 'both'
     
     # Output prefix
     OUTPUT_PREFIX = 'voltage_step_fits'
@@ -476,6 +497,11 @@ if __name__ == '__main__':
         
         # Check for sheet name argument
         sheet_name = sys.argv[2] if len(sys.argv) > 2 else 0
+        
+        # Check for step type filter argument
+        if len(sys.argv) > 3:
+            STEP_TYPE_FILTER = sys.argv[3].lower()
+            print(f"  Step type filter: {STEP_TYPE_FILTER}")
         
         if filename.endswith('.xlsx') or filename.endswith('.xls'):
             # For Excel, try to load with sheet name
@@ -597,7 +623,8 @@ if __name__ == '__main__':
         i_col=I_COL,
         step_duration=STEP_DURATION,
         t_skip=T_SKIP,
-        t_fit_max=T_FIT_MAX
+        t_fit_max=T_FIT_MAX,
+        step_type_filter=STEP_TYPE_FILTER
     )
     
     if len(results_df) == 0:
