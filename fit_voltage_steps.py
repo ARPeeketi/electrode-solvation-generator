@@ -85,21 +85,21 @@ def fit_single_step(t, i, step_type='FALLING', t_fit_max=None):
     if len(t_fit) < 10:
         return None
     
-    # Initial guesses
-    A0 = i_fit[0] - i_fit[-1]  # Amplitude from first to last
+    # Initial guesses - account for sign based on step type
+    A0 = i_fit[0] - i_fit[-1]  # Amplitude from first to last (preserves sign)
     tau0 = 0.1                  # 100 ms guess
-    B0 = 0.1                    # Small diffusion term
+    B0 = 0.1 * np.sign(A0) if A0 != 0 else 0.1  # B typically has same sign as A
     C0 = i_fit[-1]              # Steady state from last points
     
     p0 = [A0, tau0, B0, C0]
     
-    # Bounds
+    # Bounds - allow negative A and B for falling steps
     if step_type == 'FALLING':
-        # Falling: A > 0, B > 0 typically
-        bounds = ([0, 0.001, -1, -np.inf], [np.inf, 10, 5, np.inf])
+        # Falling: A < 0, B < 0 (current decreases, diffusion opposes)
+        bounds = ([-np.inf, 0.001, -10, -np.inf], [np.inf, 10, 10, np.inf])
     else:
-        # Rising: A > 0, B can be positive or negative
-        bounds = ([0, 0.001, -5, -np.inf], [np.inf, 10, 5, np.inf])
+        # Rising: A > 0, B > 0 typically
+        bounds = ([-np.inf, 0.001, -10, -np.inf], [np.inf, 10, 10, np.inf])
     
     try:
         popt, pcov = curve_fit(transient_model, t_fit, i_fit, p0=p0, 
@@ -264,82 +264,130 @@ def plot_all_fits(results_df, save_prefix='fits'):
 
 
 def plot_parameters_vs_voltage(results_df, save_prefix='fits'):
-    """Plot fit parameters vs voltage, separated by rising/falling."""
+    """Plot fit parameters vs voltage, separated by rising/falling.
     
-    rising = results_df[results_df['type'] == 'RISING']
-    falling = results_df[results_df['type'] == 'FALLING']
+    For proper symmetry comparison:
+    - RISING: plot against V_final (target voltage)
+    - FALLING: plot against V_initial (starting voltage)
+    This way both directions at "the same voltage" can be compared.
+    """
+    
+    rising = results_df[results_df['type'] == 'RISING'].copy()
+    falling = results_df[results_df['type'] == 'FALLING'].copy()
     
     fig, axes = plt.subplots(2, 3, figsize=(14, 8))
     
     # Helper for plotting with error bars
-    def plot_param(ax, df_r, df_f, param, ylabel, use_V_final=False):
-        x_col = 'V_final' if use_V_final else 'V_initial'
-        
+    # For rising: use V_final; for falling: use V_initial
+    def plot_param(ax, df_r, df_f, param, ylabel, use_abs=False, use_V_final_for_C=False):
+        """
+        For most parameters: rising uses V_final, falling uses V_initial
+        For C (steady-state): always use V_final
+        """
         # Handle special case for tau_ms
         err_col = 'tau_err_ms' if param == 'tau_ms' else f'{param}_err'
         
         if len(df_r) > 0:
-            ax.errorbar(df_r[x_col], df_r[param], yerr=df_r[err_col], 
-                       fmt='r^', markersize=8, capsize=3, label='Rising', alpha=0.8)
+            x_r = df_r['V_final']  # Rising: plot at target voltage
+            y_r = np.abs(df_r[param]) if use_abs else df_r[param]
+            ax.errorbar(x_r, y_r, yerr=df_r[err_col], 
+                       fmt='r^', markersize=10, capsize=4, label='Rising', alpha=0.8, linewidth=2)
         if len(df_f) > 0:
-            ax.errorbar(df_f[x_col], df_f[param], yerr=df_f[err_col], 
-                       fmt='bv', markersize=8, capsize=3, label='Falling', alpha=0.8)
+            # For C, use V_final; for other params, use V_initial
+            x_f = df_f['V_final'] if use_V_final_for_C else df_f['V_initial']
+            y_f = np.abs(df_f[param]) if use_abs else df_f[param]
+            ax.errorbar(x_f, y_f, yerr=df_f[err_col], 
+                       fmt='bv', markersize=10, capsize=4, label='Falling', alpha=0.8, linewidth=2)
         
-        ax.set_xlabel('V_final (V)' if use_V_final else 'V_initial (V)')
+        ax.set_xlabel('Voltage (V)')
         ax.set_ylabel(ylabel)
         ax.legend()
         ax.grid(True, alpha=0.3)
     
-    # A vs V_final
-    plot_param(axes[0,0], rising, falling, 'A', 'A (mA)', use_V_final=True)
-    axes[0,0].set_title('Amplitude A vs Final Voltage')
+    # |A| vs voltage (rising@V_final, falling@V_initial)
+    plot_param(axes[0,0], rising, falling, 'A', '|A| (mA)', use_abs=True)
+    axes[0,0].set_title('Amplitude |A| vs Voltage\n(Rising@V_final, Falling@V_initial)')
     
-    # τ vs V_final
-    plot_param(axes[0,1], rising, falling, 'tau_ms', 'τ (ms)', use_V_final=True)
-    axes[0,1].set_title('Time Constant τ vs Final Voltage')
+    # τ vs voltage
+    plot_param(axes[0,1], rising, falling, 'tau_ms', 'τ (ms)')
+    axes[0,1].set_title('Time Constant τ vs Voltage\n(Rising@V_final, Falling@V_initial)')
     
-    # B vs V_final
-    plot_param(axes[0,2], rising, falling, 'B', 'B (mA·s^0.5)', use_V_final=True)
-    axes[0,2].set_title('Diffusion B vs Final Voltage')
+    # |B| vs voltage
+    plot_param(axes[0,2], rising, falling, 'B', '|B| (mA·s^0.5)', use_abs=True)
+    axes[0,2].set_title('Diffusion |B| vs Voltage\n(Rising@V_final, Falling@V_initial)')
     
-    # C vs V_final (should depend only on V_final!)
-    plot_param(axes[1,0], rising, falling, 'C', 'C (mA)', use_V_final=True)
-    axes[1,0].set_title('Steady-State C vs Final Voltage')
+    # C vs V_final (C should ALWAYS depend on final voltage!)
+    plot_param(axes[1,0], rising, falling, 'C', 'C (mA)', use_V_final_for_C=True)
+    axes[1,0].set_title('Steady-State C vs V_final\n(Both use V_final)')
     
-    # B vs dV (should be linear if Bazant interpretation correct)
+    # |B| vs dV (should be linear if Bazant interpretation correct)
     ax = axes[1,1]
     if len(rising) > 0:
-        ax.errorbar(rising['dV'], rising['B'], yerr=rising['B_err'],
-                   fmt='r^', markersize=8, capsize=3, label='Rising', alpha=0.8)
+        ax.errorbar(rising['dV'], np.abs(rising['B']), yerr=rising['B_err'],
+                   fmt='r^', markersize=10, capsize=4, label='Rising', alpha=0.8, linewidth=2)
     if len(falling) > 0:
-        ax.errorbar(falling['dV'], falling['B'], yerr=falling['B_err'],
-                   fmt='bv', markersize=8, capsize=3, label='Falling', alpha=0.8)
+        ax.errorbar(falling['dV'], np.abs(falling['B']), yerr=falling['B_err'],
+                   fmt='bv', markersize=10, capsize=4, label='Falling', alpha=0.8, linewidth=2)
     
-    # Add linear fit
+    # Add linear fit using |B|
     all_dV = results_df['dV'].values
-    all_B = results_df['B'].values
-    if len(all_dV) > 2:
-        coeffs = np.polyfit(all_dV, all_B, 1)
-        dV_line = np.linspace(0, all_dV.max(), 100)
+    all_B_abs = np.abs(results_df['B'].values)
+    if len(all_dV) > 2 and np.std(all_dV) > 1e-6:  # Check for variation in dV
+        coeffs = np.polyfit(all_dV, all_B_abs, 1)
+        dV_line = np.linspace(0, all_dV.max() * 1.1, 100)
         ax.plot(dV_line, coeffs[0]*dV_line + coeffs[1], 'k--', 
-               label=f'Linear: B = {coeffs[0]:.3f}·ΔV + {coeffs[1]:.3f}')
+               label=f'Linear: |B| = {coeffs[0]:.3f}·ΔV + {coeffs[1]:.3f}')
     
     ax.set_xlabel('|ΔV| (V)')
-    ax.set_ylabel('B (mA·s^0.5)')
-    ax.set_title('B vs ΔV (Linearity Test)')
+    ax.set_ylabel('|B| (mA·s^0.5)')
+    ax.set_title('|B| vs ΔV (Linearity Test)')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # R² vs step number
+    # τ comparison: Rising vs Falling at same voltage
     ax = axes[1,2]
-    ax.bar(results_df['step'], results_df['R2'], color=['red' if t=='RISING' else 'blue' 
-                                                         for t in results_df['type']], alpha=0.7)
-    ax.axhline(0.99, color='green', linestyle='--', label='R²=0.99')
-    ax.set_xlabel('Step Number')
-    ax.set_ylabel('R²')
-    ax.set_title('Fit Quality')
-    ax.set_ylim([min(0.95, results_df['R2'].min()-0.01), 1.0])
-    ax.legend()
+    # Create paired comparison if we have matching voltages
+    if len(rising) > 0 and len(falling) > 0:
+        # For each rising V_final, find falling with same V_initial
+        paired_data = []
+        for _, r_row in rising.iterrows():
+            v_target = r_row['V_final']
+            # Find falling step from this voltage
+            f_match = falling[np.abs(falling['V_initial'] - v_target) < 0.05]
+            if len(f_match) > 0:
+                paired_data.append({
+                    'V': v_target,
+                    'tau_rising': r_row['tau_ms'],
+                    'tau_falling': f_match.iloc[0]['tau_ms']
+                })
+        
+        if paired_data:
+            paired_df = pd.DataFrame(paired_data)
+            x = np.arange(len(paired_df))
+            width = 0.35
+            ax.bar(x - width/2, paired_df['tau_rising'], width, label='Rising', color='red', alpha=0.7)
+            ax.bar(x + width/2, paired_df['tau_falling'], width, label='Falling', color='blue', alpha=0.7)
+            ax.set_xticks(x)
+            ax.set_xticklabels([f'{v:.2f}V' for v in paired_df['V']])
+            ax.set_xlabel('Voltage')
+            ax.set_ylabel('τ (ms)')
+            ax.set_title('τ Asymmetry: Rising vs Falling')
+            ax.legend()
+        else:
+            # No paired data, just show bar chart
+            ax.bar(results_df['step'], results_df['tau_ms'], 
+                   color=['red' if t=='RISING' else 'blue' for t in results_df['type']], alpha=0.7)
+            ax.set_xlabel('Step Number')
+            ax.set_ylabel('τ (ms)')
+            ax.set_title('Time Constant by Step')
+    else:
+        ax.bar(results_df['step'], results_df['tau_ms'], 
+               color=['red' if t=='RISING' else 'blue' for t in results_df['type']], alpha=0.7)
+        ax.set_xlabel('Step Number')
+        ax.set_ylabel('τ (ms)')
+        ax.set_title('Time Constant by Step')
+    
+    ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(f'{save_prefix}_parameters.png', dpi=150)
@@ -401,6 +449,23 @@ def plot_summary_table(results_df, save_prefix='fits'):
 if __name__ == '__main__':
     
     # =========================================================================
+    # ANALYSIS PARAMETERS (defaults - may be overridden by file loading)
+    # =========================================================================
+    
+    # Column names (adjust if your data uses different names)
+    T_COL = 'time/s'
+    V_COL = 'Ewe/V'
+    I_COL = 'I/mA'
+    
+    # Fitting parameters
+    STEP_DURATION = 4.0    # Max duration to consider for each step (s)
+    T_SKIP = 0.002         # Time to skip at start of step (s) - avoid t=0 singularity
+    T_FIT_MAX = None       # Max time to include in fit (None = use all data)
+    
+    # Output prefix
+    OUTPUT_PREFIX = 'voltage_step_fits'
+    
+    # =========================================================================
     # LOAD YOUR DATA HERE
     # =========================================================================
     
@@ -408,10 +473,62 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         filename = sys.argv[1]
         print(f"Loading: {filename}")
+        
+        # Check for sheet name argument
+        sheet_name = sys.argv[2] if len(sys.argv) > 2 else 0
+        
         if filename.endswith('.xlsx') or filename.endswith('.xls'):
-            df = pd.read_excel(filename)
+            # For Excel, try to load with sheet name
+            try:
+                df = pd.read_excel(filename, sheet_name=sheet_name)
+                original_cols = df.columns.tolist()
+                
+                # Check if first row contains units (common in electrochemistry data)
+                first_row = df.iloc[0].astype(str).tolist()
+                if any(val in ['s', 'V', 'mA', 'µA', 'A', 'ms'] for val in first_row):
+                    print(f"  Detected units row: {first_row}")
+                    # Keep original column names, just skip the units row
+                    df = df.iloc[1:].reset_index(drop=True)
+                    # Convert to numeric
+                    for col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    print(f"  Using original headers: {original_cols}")
+            except Exception as e:
+                print(f"  Error loading sheet '{sheet_name}': {e}")
+                print(f"  Available sheets: {pd.ExcelFile(filename).sheet_names}")
+                sys.exit(1)
         else:
             df = pd.read_csv(filename)
+        
+        # Try to identify columns automatically
+        cols = df.columns.tolist()
+        print(f"  Columns found: {cols}")
+        
+        # Common column name patterns
+        time_patterns = ['time', 't/', 'time/s', 'Time']
+        voltage_patterns = ['ewe', 'potential', 'voltage', 'Ewe/V', 'E/V', 'Non-iR', 'corrected potential']
+        current_patterns = ['current', 'I/mA', 'i/mA', 'I/A', 'Current']
+        
+        def find_column(patterns, columns):
+            for col in columns:
+                col_lower = str(col).lower()
+                for pat in patterns:
+                    if pat.lower() in col_lower:
+                        return col
+            return None
+        
+        t_col = find_column(time_patterns, cols)
+        v_col = find_column(voltage_patterns, cols)
+        i_col = find_column(current_patterns, cols)
+        
+        if t_col and v_col and i_col:
+            print(f"  Auto-detected: time='{t_col}', voltage='{v_col}', current='{i_col}'")
+            T_COL, V_COL, I_COL = t_col, v_col, i_col
+        else:
+            # Fallback: assume first 3 columns are time, voltage, current
+            if len(cols) >= 3:
+                T_COL, V_COL, I_COL = cols[0], cols[1], cols[2]
+                print(f"  Using positional columns: time='{T_COL}', voltage='{V_COL}', current='{I_COL}'")
     
     # Option 2: Generate demo data (comment out when using real data)
     else:
@@ -459,23 +576,6 @@ if __name__ == '__main__':
         })
         
         print(f"Demo data: {len(df)} points, {len(voltages)} voltage levels")
-    
-    # =========================================================================
-    # ANALYSIS PARAMETERS
-    # =========================================================================
-    
-    # Column names (adjust if your data uses different names)
-    T_COL = 'time/s'
-    V_COL = 'Ewe/V'
-    I_COL = 'I/mA'
-    
-    # Fitting parameters
-    STEP_DURATION = 4.0    # Max duration to consider for each step (s)
-    T_SKIP = 0.002         # Time to skip at start of step (s) - avoid t=0 singularity
-    T_FIT_MAX = None       # Max time to include in fit (None = use all data)
-    
-    # Output prefix
-    OUTPUT_PREFIX = 'voltage_step_fits'
     
     # =========================================================================
     # RUN ANALYSIS
@@ -540,18 +640,18 @@ if __name__ == '__main__':
     print(f"\nRISING steps: {len(rising)}")
     if len(rising) > 0:
         print(f"  τ mean: {rising['tau_ms'].mean():.1f} ± {rising['tau_ms'].std():.1f} ms")
-        print(f"  B/ΔV mean: {(rising['B']/rising['dV']).mean():.3f} mA·s^0.5/V")
+        print(f"  |B|/ΔV mean: {(np.abs(rising['B'])/rising['dV']).mean():.3f} mA·s^0.5/V")
     
     print(f"\nFALLING steps: {len(falling)}")
     if len(falling) > 0:
         print(f"  τ mean: {falling['tau_ms'].mean():.1f} ± {falling['tau_ms'].std():.1f} ms")
-        print(f"  B/ΔV mean: {(falling['B']/falling['dV']).mean():.3f} mA·s^0.5/V")
+        print(f"  |B|/ΔV mean: {(np.abs(falling['B'])/falling['dV']).mean():.3f} mA·s^0.5/V")
     
     # Linearity test
     if len(results_df) > 2:
         from scipy.stats import linregress
         slope, intercept, r_value, p_value, std_err = linregress(
-            results_df['dV'], results_df['B']
+            results_df['dV'], np.abs(results_df['B'])
         )
         print(f"\nLINEARITY TEST (B vs ΔV):")
         print(f"  Slope: {slope:.4f} mA·s^0.5/V")
