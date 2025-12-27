@@ -40,26 +40,106 @@ def transient_model(t, A, tau, B, C):
 
 
 # =============================================================================
-# STEP DETECTION
+# STEP DETECTION (ROBUST)
 # =============================================================================
 
-def detect_voltage_steps(df, v_col='Ewe/V', threshold=0.01):
+def detect_voltage_steps(df, v_col='Ewe/V', t_col='time/s', 
+                         min_step_size=0.05, min_duration=0.1,
+                         smoothing_window=50):
     """
-    Detect indices where voltage changes by more than threshold.
-    Returns list of (start_idx, V_before, V_after) tuples.
-    """
-    voltage = df[v_col].values
-    steps = []
+    Robustly detect voltage steps in noisy data.
     
-    for i in range(1, len(voltage)):
-        dV = voltage[i] - voltage[i-1]
-        if abs(dV) > threshold:
+    Uses:
+    1. Median smoothing to reduce noise
+    2. Clustering to identify distinct voltage levels
+    3. Duration filtering to ignore transient spikes
+    
+    Parameters:
+    -----------
+    df : DataFrame
+    v_col : str - voltage column name
+    t_col : str - time column name  
+    min_step_size : float - minimum voltage change to count as step (V)
+    min_duration : float - minimum duration at a voltage level (s)
+    smoothing_window : int - window size for median smoothing
+    
+    Returns:
+    --------
+    list of step dicts with idx, V_before, V_after, dV, type
+    """
+    voltage = df[v_col].values.copy()
+    time = df[t_col].values.copy()
+    
+    # 1. Smooth voltage with rolling median to reduce noise
+    if smoothing_window > 1 and len(voltage) > smoothing_window:
+        voltage_smooth = pd.Series(voltage).rolling(
+            window=smoothing_window, center=True, min_periods=1
+        ).median().values
+    else:
+        voltage_smooth = voltage
+    
+    # 2. Round to voltage resolution to cluster similar values
+    voltage_resolution = min_step_size / 2  # Round to half the step size
+    voltage_rounded = np.round(voltage_smooth / voltage_resolution) * voltage_resolution
+    
+    # 3. Identify distinct voltage levels and their time ranges
+    levels = []
+    current_level = voltage_rounded[0]
+    level_start_idx = 0
+    
+    for i in range(1, len(voltage_rounded)):
+        if abs(voltage_rounded[i] - current_level) > min_step_size / 2:
+            # Voltage changed - record previous level
+            duration = time[i-1] - time[level_start_idx]
+            if duration >= min_duration:
+                levels.append({
+                    'V': current_level,
+                    'V_mean': np.mean(voltage[level_start_idx:i]),
+                    'start_idx': level_start_idx,
+                    'end_idx': i - 1,
+                    'start_time': time[level_start_idx],
+                    'end_time': time[i-1],
+                    'duration': duration
+                })
+            current_level = voltage_rounded[i]
+            level_start_idx = i
+    
+    # Don't forget the last level
+    duration = time[-1] - time[level_start_idx]
+    if duration >= min_duration:
+        levels.append({
+            'V': current_level,
+            'V_mean': np.mean(voltage[level_start_idx:]),
+            'start_idx': level_start_idx,
+            'end_idx': len(voltage) - 1,
+            'start_time': time[level_start_idx],
+            'end_time': time[-1],
+            'duration': duration
+        })
+    
+    print(f"  Detected {len(levels)} voltage levels:")
+    for i, lvl in enumerate(levels):
+        print(f"    Level {i+1}: {lvl['V_mean']:.3f}V for {lvl['duration']:.2f}s "
+              f"(t={lvl['start_time']:.2f}-{lvl['end_time']:.2f}s)")
+    
+    # 4. Identify transitions between levels
+    steps = []
+    for i in range(1, len(levels)):
+        prev_level = levels[i-1]
+        curr_level = levels[i]
+        
+        dV = curr_level['V_mean'] - prev_level['V_mean']
+        
+        if abs(dV) >= min_step_size:
             steps.append({
-                'idx': i,
-                'V_before': voltage[i-1],
-                'V_after': voltage[i],
+                'idx': curr_level['start_idx'],
+                'V_before': prev_level['V_mean'],
+                'V_after': curr_level['V_mean'],
                 'dV': dV,
-                'type': 'RISING' if dV > 0 else 'FALLING'
+                'type': 'RISING' if dV > 0 else 'FALLING',
+                't_start': curr_level['start_time'],
+                't_end': curr_level['end_time'],
+                'duration': curr_level['duration']
             })
     
     return steps
@@ -147,24 +227,26 @@ def fit_single_step(t, i, step_type='FALLING', t_fit_max=None):
 
 def analyze_voltage_steps(df, t_col='time/s', v_col='Ewe/V', i_col='I/mA',
                           step_duration=4.0, t_skip=0.001, t_fit_max=None,
-                          step_type_filter='both'):
+                          step_type_filter='both', min_step_size=0.05):
     """
     Analyze all voltage steps in the data.
     
     Parameters:
     -----------
     df : DataFrame with time, voltage, current columns
-    step_duration : float - expected duration of each step (seconds)
+    step_duration : float - max duration to consider for fitting (seconds)
     t_skip : float - time to skip at start of each step
     t_fit_max : float - max time to fit (None = use step_duration)
     step_type_filter : str - 'rising', 'falling', or 'both'
+    min_step_size : float - minimum voltage change to count as step (V)
     
     Returns:
     --------
     results_df : DataFrame with fit parameters for each step
     """
-    # Detect steps
-    steps = detect_voltage_steps(df, v_col=v_col)
+    # Detect steps with robust algorithm
+    steps = detect_voltage_steps(df, v_col=v_col, t_col=t_col, 
+                                  min_step_size=min_step_size)
     print(f"Found {len(steps)} voltage steps")
     
     # Filter by step type if requested
@@ -182,19 +264,19 @@ def analyze_voltage_steps(df, t_col='time/s', v_col='Ewe/V', i_col='I/mA',
         V_before = step['V_before']
         V_after = step['V_after']
         step_type = step['type']
+        t_start = step['t_start']
+        t_end = step['t_end']
         
         print(f"\nStep {i+1}: {V_before:.3f} → {V_after:.3f} V ({step_type})")
+        print(f"         t = {t_start:.3f}s to {t_end:.3f}s ({t_end-t_start:.2f}s duration)")
         
-        # Extract segment for this step
-        # From step index to either next step or step_duration
-        if i < len(steps) - 1:
-            idx_end = steps[i+1]['idx']
-        else:
-            # Last step: use time-based cutoff
-            t_step_start = df[t_col].iloc[idx]
-            idx_end = df[df[t_col] <= t_step_start + step_duration].index[-1] + 1
+        # Extract segment for this step - use the detected time range
+        # but limit to step_duration if specified
+        actual_duration = min(step['duration'], step_duration)
+        t_end_fit = t_start + actual_duration
         
-        df_seg = df.iloc[idx:idx_end].copy()
+        mask = (df[t_col] >= t_start) & (df[t_col] <= t_end_fit)
+        df_seg = df[mask].copy()
         
         # Reset time to start at 0
         t0 = df_seg[t_col].iloc[0]
